@@ -323,14 +323,23 @@ impl GameContract {
         }
 
         let mut player2_escrow = 0;
+        let mut total_pool = game.wager_amount;
+        
         if let Some(ref player2) = game.player2 {
             player2_escrow = escrow.get(player2.clone()).unwrap_or(0);
             if player2_escrow < game.wager_amount {
                 return Err(ContractError::InsufficientFunds);
             }
+            total_pool = game.wager_amount * 2;
         }
 
-        let total_pool = game.wager_amount * 2;
+        // Subtract from players FIRST to avoid overwriting their payout if they are also a winner
+        escrow.set(game.player1.clone(), player1_escrow - game.wager_amount);
+
+        if let Some(ref player2) = game.player2 {
+            escrow.set(player2.clone(), player2_escrow - game.wager_amount);
+        }
+
         let mut distributed: i128 = 0;
 
         for i in 0..winners.len() {
@@ -341,6 +350,7 @@ impl GameContract {
             let payout_amount = (total_pool * percentage as i128) / 100;
             distributed += payout_amount;
 
+            // Fetch latest escrow in case the winner was also one of the debited players
             let winner_escrow = escrow.get(winner.clone()).unwrap_or(0);
             escrow.set(winner.clone(), winner_escrow + payout_amount);
         }
@@ -351,13 +361,6 @@ impl GameContract {
             let first_winner = winners.get(0).unwrap();
             let winner_escrow = escrow.get(first_winner.clone()).unwrap_or(0);
             escrow.set(first_winner.clone(), winner_escrow + remainder);
-        }
-
-        // Subtract from losers (which are both players since total_pool uses both their wagers)
-        escrow.set(game.player1.clone(), player1_escrow - game.wager_amount);
-
-        if let Some(ref player2) = game.player2 {
-            escrow.set(player2.clone(), player2_escrow - game.wager_amount);
         }
 
         env.storage().instance().set(&ESCROW, &escrow);
