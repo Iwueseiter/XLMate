@@ -10,6 +10,12 @@ use actix_web::error::ErrorUnauthorized;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+// For Redis Pub/Sub
+use redis::AsyncCommands;
+use redis::aio::ConnectionManager;
+use tokio::task::JoinHandle;
+use std::sync::Arc;
+
 /// Core WebSocket message types
 #[derive(Message, Serialize, Clone, Debug, PartialEq)]
 #[rtype(result = "()")]
@@ -102,6 +108,9 @@ pub struct WsSession {
     pub user_id: i32,
     pub username: String,
     pub session_id: String,
+    pub redis_conn: Option<Arc<ConnectionManager>>, // Redis connection for Pub/Sub
+    pub redis_sub_task: Option<JoinHandle<()>>,     // Handle for the subscription task
+    hb: std::time::Instant,
 }
 
 impl WsSession {
@@ -141,6 +150,29 @@ impl Actor for WsSession {
         self.hb(ctx);
         let addr = ctx.address().recipient();
         self.lobby.do_send(Connect { game_id: self.game_id.clone(), addr });
+
+        // If Redis connection is available, subscribe to match channel
+        if let Some(redis_conn) = self.redis_conn.clone() {
+            let game_id = self.game_id.clone();
+            let addr = ctx.address();
+            let channel = format!("match:{}", game_id);
+            // Spawn a background task for Redis subscription
+            let handle = tokio::spawn(async move {
+                let mut pubsub = redis_conn.clone().into_pubsub();
+                if pubsub.subscribe(&channel).await.is_ok() {
+                    let mut stream = pubsub.on_message();
+                    while let Some(msg) = stream.next().await {
+                        if let Ok(payload): Result<String, _> = msg.get_payload() {
+                            // Forward to session actor
+                            if let Ok(ws_msg) = serde_json::from_str::<WsMessage>(&payload) {
+                                let _ = addr.do_send(ws_msg);
+                            }
+                        }
+                    }
+                }
+            });
+            self.redis_sub_task = Some(handle);
+        }
     }
 
     fn stopped(&mut self, ctx: &mut Self::Context) {
@@ -162,6 +194,10 @@ impl Actor for WsSession {
         
         let addr = ctx.address().recipient();
         self.lobby.do_send(Disconnect { game_id: self.game_id.clone(), addr });
+        // Cancel Redis subscription task if running
+        if let Some(handle) = self.redis_sub_task.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -175,7 +211,22 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsSession {
             Ok(ws::Message::Pong(_)) => {
                 self.hb = std::time::Instant::now();
             }
-            Ok(ws::Message::Text(_)) | Ok(ws::Message::Binary(_)) => {}
+            Ok(ws::Message::Text(text)) => {
+                // Try to parse as WsMessage
+                if let Ok(ws_msg) = serde_json::from_str::<WsMessage>(&text) {
+                    // Publish to Redis if connection available
+                    if let Some(redis_conn) = self.redis_conn.clone() {
+                        let channel = format!("match:{}", self.game_id);
+                        let payload = text.clone();
+                        // Spawn a task to publish (non-blocking)
+                        tokio::spawn(async move {
+                            let mut conn = (*redis_conn).clone();
+                            let _: redis::RedisResult<()> = conn.publish(channel, payload).await;
+                        });
+                    }
+                }
+            }
+            Ok(ws::Message::Binary(_)) => {}
             Ok(ws::Message::Close(reason)) => {
                 ctx.close(reason);
                 ctx.stop();
