@@ -7,14 +7,17 @@ const ChessboardComponent = dynamic(
   { ssr: false },
 );
 import { Chess } from "chess.js";
-const GameModeButtons = dynamic(() => import("@/components/GameModeButtons"), {
-  ssr: false,
-});
+const GameModeButtons = dynamic(() => import("@/components/GameModeButtons"), { ssr: false });
+const AiPersonalityModal = dynamic(
+  () => import("@/app/components/matchmaking/AiPersonalityModal").then((m) => ({ default: m.AiPersonalityModal })),
+  { ssr: false }
+);
 import { FaUser } from "react-icons/fa";
 import { RiAliensFill } from "react-icons/ri";
 import { useChessSocket } from "@/hook/useChessSocket";
 import { useMatchmaking } from "@/hook/useMatchmaking";
 import { useRouter } from "next/navigation";
+import { useMatchmakingContext } from "@/context/matchmakingContext";
 
 export default function Home() {
   const [game] = useState(new Chess());
@@ -22,6 +25,9 @@ export default function Home() {
   const [gameMode, setGameMode] = useState<"online" | "bot" | null>(null);
   const router = useRouter();
   const MOCK_PLAYER_COUNT = 847; // replace with real web socket player count
+  const [isPersonalityModalOpen, setIsPersonalityModalOpen] = useState(false);
+
+  const { aiPersonality } = useMatchmakingContext();
 
   const {
     status: matchmakingStatus,
@@ -53,13 +59,8 @@ export default function Home() {
     [gameId, socketSendMove, matchmakingSendMove],
   );
 
-  // Kick off matchmaking when online mode is selected
-  useEffect(() => {
-    if (gameMode === "online") {
-      joinMatchmaking();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gameMode]);
+  // Kick off matchmaking when online mode is selected — but only after personality is confirmed
+  // (joinMatchmaking is now called from handlePersonalityConfirm, not here)
 
   useEffect(() => {
     if (matchmakingStatus === "match_found" && gameId) {
@@ -129,7 +130,23 @@ export default function Home() {
   };
 
   const handleSetGameMode = (mode: "online" | "bot" | null) => {
-    setGameMode(mode);
+    if (mode === "online") {
+      // Show personality selection before joining the queue
+      setGameMode(mode);
+      setIsPersonalityModalOpen(true);
+    } else {
+      setGameMode(mode);
+    }
+  };
+
+  const handlePersonalityConfirm = () => {
+    setIsPersonalityModalOpen(false);
+    joinMatchmaking(aiPersonality);
+  };
+
+  const handlePersonalityClose = () => {
+    setIsPersonalityModalOpen(false);
+    setGameMode(null);
   };
 
   // Searching / waiting overlay label
@@ -269,6 +286,13 @@ export default function Home() {
           </div>
         </div>
       </div>
+
+      {/* AI Personality Selection Modal */}
+      <AiPersonalityModal
+        isOpen={isPersonalityModalOpen}
+        onClose={handlePersonalityClose}
+        onConfirm={handlePersonalityConfirm}
+      />
     </div>
   );
 }
